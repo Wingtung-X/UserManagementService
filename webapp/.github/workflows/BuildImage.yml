@@ -1,0 +1,256 @@
+name: build-image
+on:
+  pull_request:
+    types:
+        - closed
+
+jobs:
+  build-image:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:14
+        env:
+          POSTGRES_PASSWORD: 123
+          POSTGRES_USER: yingtong
+          POSTGRES_DB: cloud_computing
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: checkout repo
+        uses: actions/checkout@v3
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v3
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Create application.properties
+        run: |
+          echo "Creating application.properties"
+          cat <<EOT > src/main/resources/application.properties
+          spring.application.name=CloudComputing
+
+          # Data source
+          spring.datasource.url=jdbc:postgresql://localhost:5432/cloud_computing
+          spring.datasource.username=yingtong
+          spring.datasource.password=123
+
+          # JPA config
+          spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.PostgreSQLDialect
+          spring.jpa.hibernate.ddl-auto=update
+
+          # S3 config
+            aws.s3.bucket.name=yingtong-test-webapp-bucket
+
+            # logs
+            logging.file.path=logs
+            logging.file.name=csye6225.log
+
+            #aws
+            cloud.aws.credentials.profile=default
+            cloud.aws.region.static=us-west-2
+
+            #aws.region=us-west-2
+            #aws.profile=dev
+
+
+
+            spring.servlet.multipart.enabled=true
+            spring.servlet.multipart.max-file-size=10MB
+            spring.servlet.multipart.max-request-size=10MB
+
+            management.metrics.export.cloudwatch.namespace=Test5
+            management.metrics.export.cloudwatch.step=5s
+
+            logging.level.io.micrometer=DEBUG
+            logging.level.org.springframework.cloud=DEBUG
+
+            # cw
+            #CLOUDWATCH_NAMESPACE=Test6
+            #METRICS_ENABLED=true
+            management.metrics.enable.jvm=false
+            management.metrics.enable.system=false
+            management.metrics.enable.logback=false
+            management.metrics.enable.spring=false
+            management.metrics.enable.process=false
+            management.metrics.enable.hikaricp=false
+          
+            #domain for verification email
+            aws.sns.topicArn=arn:aws:sns:us-west-2:529088267820:yingtong_test
+          EOT
+
+      
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4.0.2
+        with:
+            aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+            aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+            aws-region: us-west-2
+
+
+
+      - name: Build and run all tests
+        run: mvn test
+
+      - name: Build webapp
+        run: mvn clean package
+
+      - name: Build custom image
+        if: ${{ success() }}
+        id: build_ami
+        run: |
+          cd packer
+          packer init packer-webapp.pkr.hcl
+          AMI_ID=$(packer build -machine-readable packer-webapp.pkr.hcl | awk -F, '/artifact,0,id/ {print $6}' | cut -d':' -f2)
+          echo "AMI_ID=${AMI_ID}"
+          echo "ami_id=${AMI_ID}" >> $GITHUB_OUTPUT
+
+#      - name: Use pre-existing custom image
+#        if: ${{ success() }}
+#        id: build_ami
+#        run: |
+#          AMI_ID="ami-0ef58e81559fe187a"
+#          echo "Using existing AMI: ${AMI_ID}"
+#          echo "ami_id=${AMI_ID}" >> $GITHUB_OUTPUT
+
+
+      - name: Share AMI with DEMO Account
+        if: ${{ success() }}
+        env:
+          DEMO_ACCOUNT_ID: ${{ secrets.DEMO_ACCOUNT_ID }}
+        run: |
+          aws ec2 modify-image-attribute --image-id ${{ steps.build_ami.outputs.ami_id }} --launch-permission "Add=[{UserId=${DEMO_ACCOUNT_ID}}]"
+        
+        
+      - name: Configure AWS Credentials for Demo Account
+        uses: aws-actions/configure-aws-credentials@v4.0.2
+        with:
+          aws-access-key-id: ${{ secrets.DEMO_KEY }}
+          aws-secret-access-key: ${{ secrets.DEMO_SECRET }}
+          aws-region: us-west-2
+
+
+      - name: Update Launch Template in Demo Account
+        id: update_demo_launch_template
+        run: |
+          # get launch template id
+          DEMO_LAUNCH_TEMPLATE_ID=$(aws ec2 describe-launch-templates --query "LaunchTemplates[?LaunchTemplateName=='csye6225_asg'].LaunchTemplateId" --output text)
+          if [ -z "$DEMO_LAUNCH_TEMPLATE_ID" ]; then
+            echo "Demo Launch Template not found. Exiting..."
+            exit 1
+          fi
+          echo "Found Demo Launch Template: $DEMO_LAUNCH_TEMPLATE_ID"
+
+          # get current version
+          CURRENT_VERSION=$(aws ec2 describe-launch-templates \
+            --launch-template-ids "$DEMO_LAUNCH_TEMPLATE_ID" \
+            --query "LaunchTemplates[0].LatestVersionNumber" \
+            --output text)
+          echo "Current Launch Template Version: $CURRENT_VERSION"
+
+          # change image id only
+          NEW_VERSION=$(aws ec2 create-launch-template-version \
+            --launch-template-id "$DEMO_LAUNCH_TEMPLATE_ID" \
+            --source-version "$CURRENT_VERSION" \
+            --launch-template-data "{\"ImageId\":\"${{ steps.build_ami.outputs.ami_id }}\"}" \
+            --query "LaunchTemplateVersion.VersionNumber" \
+            --output text)
+
+          echo "New Launch Template Version: $NEW_VERSION"
+          echo "demo_launch_template_id=${DEMO_LAUNCH_TEMPLATE_ID}" >> $GITHUB_ENV
+          echo "demo_launch_template_version=${NEW_VERSION}" >> $GITHUB_ENV
+
+
+
+      - name: Update Auto Scaling Group in Demo Account
+        run: |
+          DEMO_ASG_NAME="webapp_auto_scaling_group"
+
+          echo "Updating Auto Scaling Group with Launch Template ID: $demo_launch_template_id and Version: $demo_launch_template_version"
+
+          aws autoscaling update-auto-scaling-group \
+            --auto-scaling-group-name $DEMO_ASG_NAME \
+            --launch-template "{\"LaunchTemplateId\":\"$demo_launch_template_id\",\"Version\":\"$demo_launch_template_version\"}"
+        env:
+          demo_launch_template_id: ${{ env.demo_launch_template_id }}
+          demo_launch_template_version: ${{ env.demo_launch_template_version }}
+
+
+
+      - name: Trigger Instance Refresh
+        id: demo_instance_refresh
+        run: |
+          DEMO_ASG_NAME="webapp_auto_scaling_group"
+          echo "Starting Instance Refresh for Auto Scaling Group: $DEMO_ASG_NAME"
+
+          DEMO_REFRESH_ID=$(aws autoscaling start-instance-refresh \
+            --auto-scaling-group-name "$DEMO_ASG_NAME" \
+            --preferences '{"MinHealthyPercentage": 50, "InstanceWarmup": 300}' \
+            --query 'InstanceRefreshId' \
+            --output text)
+
+          if [ -z "$DEMO_REFRESH_ID" ]; then
+            echo "Error: Failed to start instance refresh. Exiting."
+            exit 1
+          fi
+
+          echo "Instance Refresh ID: $DEMO_REFRESH_ID"
+          echo "demo_instance_refresh_id=${DEMO_REFRESH_ID}" >> $GITHUB_OUTPUT
+      
+
+      - name: Wait for Refresh
+        run: |
+          DEMO_ASG_NAME="webapp_auto_scaling_group"
+          DEMO_REFRESH_ID=${{ steps.demo_instance_refresh.outputs.demo_instance_refresh_id }}
+
+          if [ -z "$DEMO_REFRESH_ID" ]; then
+            echo "Error: Instance Refresh ID is empty. Exiting."
+            exit 1
+          fi
+
+          TIMEOUT=1800
+          START_TIME=$(date +%s)
+
+          while true; do
+            STATUS=$(aws autoscaling describe-instance-refreshes \
+              --auto-scaling-group-name "$DEMO_ASG_NAME" \
+              --query "InstanceRefreshes[?InstanceRefreshId=='$DEMO_REFRESH_ID'].Status" \
+              --output text)
+
+            if [ -z "$STATUS" ]; then
+              echo "Error: Failed to get instance refresh status. Exiting."
+              exit 1
+            fi
+
+            echo "Current Status: $STATUS"
+
+            if [ "$STATUS" == "Successful" ]; then
+              echo "Demo Instance refresh completed successfully!"
+              break
+            elif [ "$STATUS" == "Failed" ]; then
+              echo "Demo Instance refresh failed!"
+              exit 1
+            fi
+
+            CURRENT_TIME=$(date +%s)
+            ELAPSED_TIME=$((CURRENT_TIME - START_TIME))
+
+            if [ "$ELAPSED_TIME" -ge "$TIMEOUT" ]; then
+              echo "Error: Instance refresh timed out after $TIMEOUT seconds. Exiting."
+              exit 1
+            fi
+
+            sleep 30
+          done
+      
+      

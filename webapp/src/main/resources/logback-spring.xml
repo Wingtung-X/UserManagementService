@@ -1,0 +1,39 @@
+<configuration>
+    <!-- JSON Console Appender -->
+    <appender name="JSON_CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+            <includeCallerData>true</includeCallerData>
+            <fieldNames>
+                <timestamp>timestamp</timestamp>
+                <level>level</level>
+                <logger>logger</logger>
+                <thread>thread</thread>
+                <message>message</message>
+                <caller_method_name>method</caller_method_name>
+            </fieldNames>
+        </encoder>
+    </appender>
+
+    <!-- File Appender for plain text logs -->
+    <appender name="FILE" class="ch.qos.logback.core.FileAppender">
+        <file>${logging.file.name:-csye6225.log}</file>
+        <append>true</append>
+        <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+            <includeCallerData>true</includeCallerData>
+            <fieldNames>
+                <timestamp>timestamp</timestamp>
+                <level>level</level>
+                <logger>logger</logger>
+                <thread>thread</thread>
+                <message>message</message>
+                <caller_method_name>method</caller_method_name>
+            </fieldNames>
+        </encoder>
+    </appender>
+
+    <!-- Root logger: outputs to both console and file -->
+    <root level="info">
+        <appender-ref ref="JSON_CONSOLE" /> <!-- 输出到控制台，JSON 格式 -->
+        <appender-ref ref="FILE" /> <!-- 输出到文件，普通文本格式 -->
+    </root>
+</configuration>

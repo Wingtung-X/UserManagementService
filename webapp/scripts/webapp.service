@@ -1,0 +1,19 @@
+[Unit]
+Description=Web app
+ConditionPathExists=/opt/app/application.properties
+After=network.target
+
+[Service]
+Type=simple
+User=csye6225
+Group=csye6225
+WorkingDirectory=/opt/app
+ExecStart=/usr/bin/java -jar /opt/app/CloudComputing-0.0.1-SNAPSHOT.jar --spring.config.location="/opt/app/application.properties"
+Restart=always
+RestartSec=3
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=csye6225
+
+[Install]
+WantedBy=multi-user.target
