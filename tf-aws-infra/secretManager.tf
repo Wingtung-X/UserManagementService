@@ -74,7 +74,7 @@ resource "aws_secretsmanager_secret" "email_service_credentials" {
 resource "aws_secretsmanager_secret_version" "email_service_credentials_version" {
   secret_id = aws_secretsmanager_secret.email_service_credentials.id
   secret_string = jsonencode({
-    api_key = "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"
+  api_key = var.sendgrid_key
   })
 }
 
